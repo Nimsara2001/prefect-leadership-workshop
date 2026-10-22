@@ -16,17 +16,19 @@
 
   /* ---------- 1. Config ---------- */
 
-  // Planned minutes per section. Edit here AND the data-minutes values on slides;
-  // the script checks that both agree and that the total is 120.
+  // Section names (English). Sinhala names live in js/i18n-si.js under "sections".
   const SECTIONS = {
-    A: { name: 'Opening and Introduction', minutes: 10 },
-    B: { name: 'Understanding Leadership', minutes: 40 },
-    C: { name: 'Break', minutes: 5 },
-    D: { name: 'Balancing Leadership and Studies', minutes: 35 },
-    E: { name: 'Weekly Planning Activity', minutes: 20 },
-    F: { name: 'Reflection and Closing', minutes: 10 },
+    A: 'Opening and Introduction',
+    B: 'Understanding Leadership',
+    C: 'Break',
+    D: 'Balancing Leadership and Studies',
+    E: 'My Experience',
+    F: 'Reflection and Closing',
   };
-  const TOTAL_MINUTES = 120;
+
+  // Sinhala strings (optional file). Falls back to English text for anything missing.
+  const SI = window.PRESENTATION_SI || { blocks: {}, attrs: {}, sections: {}, titles: {}, meta: {} };
+  const LANG_KEY = 'prefect-presentation-lang';
 
   /* ---------- 2. State and elements ---------- */
 
@@ -36,13 +38,13 @@
   const total = slides.length;
   const visited = new Set();
   let current = -1;
+  let lang = 'en';
 
   const el = {
     progress: $('progressBar'),
     footCur: $('footCur'),
     footTot: $('footTot'),
     footSec: $('footSec'),
-    secMap: $('secMap'),
     status: $('sr-status'),
     ui: $('ui'),
     btnPrev: $('btnPrev'),
@@ -51,6 +53,7 @@
     btnNotes: $('btnNotes'),
     btnFull: $('btnFull'),
     btnHelp: $('btnHelp'),
+    btnLang: $('btnLang'),
     notesPanel: $('notesPanel'),
     npMeta: $('npMeta'),
     npTitle: $('npTitle'),
@@ -63,33 +66,6 @@
 
   const pad = (n) => String(n).padStart(2, '0');
   const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-
-  // Planned clock (minutes elapsed at the start of each slide).
-  const startMinute = [];
-  (function computeClock() {
-    let acc = 0;
-    slides.forEach((s, i) => {
-      startMinute[i] = acc;
-      acc += Number(s.dataset.minutes) || 0;
-    });
-  })();
-
-  function validateTiming() {
-    const sums = {};
-    slides.forEach((s) => {
-      sums[s.dataset.section] = (sums[s.dataset.section] || 0) + (Number(s.dataset.minutes) || 0);
-    });
-    let grand = 0;
-    Object.keys(SECTIONS).forEach((k) => {
-      grand += sums[k] || 0;
-      if ((sums[k] || 0) !== SECTIONS[k].minutes) {
-        console.warn(`Section ${k}: slides add up to ${sums[k] || 0} min, config says ${SECTIONS[k].minutes}.`);
-      }
-    });
-    if (grand !== TOTAL_MINUTES) {
-      console.warn(`Planned total is ${grand} minutes, expected ${TOTAL_MINUTES}.`);
-    }
-  }
 
   /* ---------- 3. Navigation ---------- */
 
@@ -124,7 +100,7 @@
     updateChrome();
     updateNotes();
     history.replaceState(null, '', '#' + (current + 1));
-    el.status.textContent = `Slide ${current + 1} of ${total}: ${slide.dataset.title}`;
+    el.status.textContent = `${current + 1} / ${total}: ${slideTitle(slide)}`;
     el.btnPrev.disabled = current === 0;
     el.btnNext.disabled = current === total - 1;
   }
@@ -132,28 +108,103 @@
   const next = () => goTo(current + 1);
   const prev = () => goTo(current - 1);
 
-  function buildSectionMap() {
-    el.secMap.textContent = '';
-    Object.keys(SECTIONS).forEach((k) => {
-      const seg = document.createElement('i');
-      seg.dataset.sec = k;
-      seg.style.flexGrow = SECTIONS[k].minutes;
-      el.secMap.appendChild(seg);
-    });
-  }
-
   function updateChrome() {
     const slide = slides[current];
     const key = slide.dataset.section;
-    const sec = SECTIONS[key];
     el.footCur.textContent = pad(current + 1);
     el.footTot.textContent = pad(total);
-    el.footSec.textContent = `${key} · ${sec.name} · ${sec.minutes} min`;
+    el.footSec.textContent = `${key} · ${sectionName(key)}`;
     el.progress.style.transform = `scaleX(${total > 1 ? current / (total - 1) : 1})`;
-    el.secMap.querySelectorAll('i').forEach((seg) => {
-      seg.classList.toggle('on', seg.dataset.sec === key);
+  }
+
+  /* ---------- Language (English / Sinhala) ---------- */
+
+  const norm = (s) => s.replace(/\u00AD/g, '').replace(/\s+/g, ' ').trim();
+  const sectionName = (key) => (lang === 'si' && SI.sections[SECTIONS[key]]) || SECTIONS[key];
+  const slideTitle = (s) => (lang === 'si' && SI.titles[s.dataset.title]) || s.dataset.title;
+
+  // Inline elements allowed inside a translatable text block.
+  function isInline(c) {
+    const t = c.tagName.toLowerCase();
+    if (t === 'svg') return true;
+    if (t === 'b' || t === 'mark' || t === 'em' || t === 'strong' || t === 'br') return [...c.children].every(isInline);
+    if (t === 'span') return /^(gold|sage-t|warn)$/.test(c.className) && [...c.children].every(isInline);
+    return false;
+  }
+
+  // Find translatable text blocks: elements whose children are all inline.
+  const blocks = [];
+  function collect(node) {
+    Array.from(node.children).forEach((c) => {
+      const tag = c.tagName.toLowerCase();
+      if (c.matches('.notes, script, style, .foot, .timer-display, #npMeta, #npTitle')) return;
+      if (tag === 'svg') {
+        c.querySelectorAll('text').forEach((t) => blocks.push({ el: t, en: t.innerHTML, key: norm(t.textContent) }));
+        return;
+      }
+      if (c.textContent.trim() && Array.from(c.children).every(isInline)) {
+        blocks.push({ el: c, en: c.innerHTML, key: norm(c.textContent) });
+      } else if (c.children.length) {
+        collect(c);
+      }
     });
   }
+
+  // Elements with translatable aria-label / title attributes.
+  const attrEls = [];
+  function collectAttrs() {
+    document.querySelectorAll('[aria-label], [title]').forEach((n) => {
+      if (n.id === 'btnLang') return;
+      const rec = { el: n, aria: n.getAttribute('aria-label'), title: n.getAttribute('title') };
+      attrEls.push(rec);
+    });
+  }
+
+  const missing = new Set();
+  function applyLanguage(next) {
+    lang = next;
+    document.documentElement.lang = lang === 'si' ? 'si' : 'en';
+    missing.clear();
+
+    blocks.forEach((b) => {
+      if (lang === 'si') {
+        const v = SI.blocks[b.key];
+        if (v === undefined) { if (/[A-Za-z]{3}/.test(b.key)) missing.add(b.key); b.el.innerHTML = b.en; return; }
+        const svgs = Array.from(b.el.querySelectorAll(':scope > svg'));
+        b.el.innerHTML = v;
+        svgs.reverse().forEach((s) => b.el.prepend(s));
+      } else {
+        b.el.innerHTML = b.en;
+      }
+    });
+    window.__i18nMissing = Array.from(missing);
+
+    attrEls.forEach((r) => {
+      [['aria-label', r.aria], ['title', r.title]].forEach(([name, en]) => {
+        if (en === null) return;
+        r.el.setAttribute(name, (lang === 'si' && SI.attrs[en]) || en);
+      });
+    });
+    slides.forEach((s) => s.setAttribute('aria-label', slideTitle(s)));
+
+    el.btnLang.textContent = lang === 'si' ? 'EN' : 'සිං';
+    el.btnLang.setAttribute('lang', lang === 'si' ? 'en' : 'si');
+    el.btnLang.setAttribute('aria-label', lang === 'si' ? 'Switch language to English' : 'සිංහල භාෂාවට මාරු වන්න (Switch language to Sinhala)');
+    document.title = (lang === 'si' && SI.meta.title) || 'Lead Others Without Losing Yourself | Prefect Board Workshop';
+
+    // Grid thumbnails are clones, so rebuild them next time they are needed.
+    gridBuilt = false;
+    el.gridList.textContent = '';
+    if (current >= 0) {
+      updateChrome();
+      updateNotes();
+      el.status.textContent = `${current + 1} / ${total}: ${slideTitle(slides[current])}`;
+    }
+    if (openOverlay === el.grid) { buildGrid(); scaleThumbs(); }
+    try { localStorage.setItem(LANG_KEY, lang); } catch (e) { /* storage may be unavailable */ }
+  }
+
+  const toggleLanguage = () => applyLanguage(lang === 'si' ? 'en' : 'si');
 
   /* ---------- 4. Overlays and notes ---------- */
 
@@ -200,7 +251,7 @@
       btn.type = 'button';
       btn.className = 'thumb';
       btn.dataset.i = String(i);
-      btn.setAttribute('aria-label', `Go to slide ${i + 1}: ${s.dataset.title}`);
+      btn.setAttribute('aria-label', `${i + 1}. ${slideTitle(s)}`);
 
       const frame = document.createElement('span');
       frame.className = 'thumb-frame';
@@ -214,7 +265,7 @@
 
       const cap = document.createElement('span');
       cap.className = 'thumb-cap';
-      cap.textContent = `${i + 1}. ${s.dataset.title}`;
+      cap.textContent = `${i + 1}. ${slideTitle(s)}`;
       btn.append(frame, cap);
       el.gridList.appendChild(btn);
     });
@@ -256,9 +307,8 @@
   // Speaker notes (presenter-only panel).
   function updateNotes() {
     const s = slides[current];
-    const sec = SECTIONS[s.dataset.section];
-    el.npMeta.textContent = `Slide ${current + 1} of ${total} · Section ${s.dataset.section}: ${sec.name} · ~${s.dataset.minutes} min · planned clock ${startMinute[current]} min`;
-    el.npTitle.textContent = s.dataset.title;
+    el.npMeta.textContent = `Slide ${current + 1} of ${total} · Section ${s.dataset.section}: ${SECTIONS[s.dataset.section]}`;
+    el.npTitle.textContent = slideTitle(s);
     const n = s.querySelector('.notes');
     el.npBody.innerHTML = n ? n.innerHTML : '<p>No notes for this slide.</p>';
     el.npBody.scrollTop = 0;
@@ -321,10 +371,29 @@
     }
     function toggle() { if (handle === null) start(); else stop(); }
 
+    // Add or remove whole minutes (works while running or paused).
+    function adjust(deltaMs) {
+      const MAX = 99 * 60 * 1000;
+      if (handle !== null) {
+        endAt = clamp(endAt + deltaMs, Date.now(), Date.now() + MAX);
+        remaining = Math.max(0, endAt - Date.now());
+      } else {
+        remaining = clamp(remaining + deltaMs, 0, MAX);
+        if (remaining > 0) root.classList.remove('done');
+      }
+      render();
+    }
+
     root.addEventListener('click', (e) => {
       const b = e.target.closest('button[data-action]');
       if (!b) return;
-      ({ start, pause: stop, reset })[b.dataset.action]();
+      ({
+        start,
+        pause: stop,
+        reset,
+        minus: () => adjust(-60000),
+        plus: () => adjust(60000),
+      })[b.dataset.action]();
     });
 
     render();
@@ -346,10 +415,8 @@
     const panel = slide.querySelector(`[data-panel="${btn.dataset.reveal}"]`);
     if (!panel) return;
     panel.hidden = !show;
+    // Button label swaps through CSS (.when-hidden / .when-shown) so it can be translated.
     btn.setAttribute('aria-expanded', String(show));
-    btn.querySelector('span').textContent = show
-      ? btn.querySelector('span').textContent.replace(/^Show/, 'Hide')
-      : btn.querySelector('span').textContent.replace(/^Hide/, 'Show');
   }
 
   function initReveals() {
@@ -418,6 +485,7 @@
       case 'g': case 'G': e.preventDefault(); toggleGrid(); break;
       case 't': case 'T': e.preventDefault(); toggleSlideTimer(); break;
       case 'r': case 'R': e.preventDefault(); toggleSlideReveal(); break;
+      case 'l': case 'L': e.preventDefault(); toggleLanguage(); break;
       case '?': e.preventDefault(); toggleHelp(); break;
       default: break;
     }
@@ -478,14 +546,26 @@
   /* ---------- 7. Init ---------- */
 
   function init() {
-    validateTiming();
-    buildSectionMap();
-
     // Stagger index for entrance animations (capped so late items do not lag).
     slides.forEach((s) => {
       s.querySelectorAll('.a').forEach((n, k) => n.style.setProperty('--i', String(Math.min(k, 9))));
-      s.setAttribute('aria-label', `Slide: ${s.dataset.title}`);
     });
+
+    // Language: gather translatable text once, then apply the saved choice.
+    collect(stage);
+    collect(document.querySelector('.help-box'));
+    collect(document.querySelector('.notes-panel header'));
+    collect(el.grid.querySelector('header'));
+    collectAttrs();
+    // Developer aid: lists every translatable string (see README, "Sinhala translation").
+    window.__i18nKeys = () => ({
+      blocks: Array.from(new Set(blocks.map((b) => b.key))),
+      attrs: Array.from(new Set(attrEls.flatMap((r) => [r.aria, r.title]).filter(Boolean))),
+    });
+    el.btnLang.addEventListener('click', toggleLanguage);
+    let saved = 'en';
+    try { saved = localStorage.getItem(LANG_KEY) || 'en'; } catch (e) { /* ignore */ }
+    applyLanguage(saved === 'si' ? 'si' : 'en');
 
     initTimers();
     initReveals();
